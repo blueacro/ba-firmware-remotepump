@@ -17,7 +17,9 @@ stm32f4xx-hal = { version = "0.11", features = ["rt", "stm32f411", "usb_fs"]}
 usbd-serial = "0"
 usb-device = "0"
 
-ssd1306 = "0.7"
+sh1106 = "0.4"
+embedded-graphics =" 0.7"
+display-interface = "*"
 
 # cargo build/run
 [profile.dev]
