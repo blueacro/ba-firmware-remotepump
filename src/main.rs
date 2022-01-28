@@ -1,9 +1,11 @@
-//! CDC-ACM serial port example using polling in a busy loop.
-//! Target board: any STM32F4 with a OTG FS peripheral and a 25MHz HSE crystal
 #![no_std]
 #![no_main]
 
+use core::convert::Infallible;
+use core::fmt::Error;
+
 use cortex_m_rt::entry;
+use stm32f4xx_hal::hal::digital::v2::{OutputPin, ToggleableOutputPin};
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
 use stm32f4xx_hal::{i2c::I2c, pac, prelude::*};
 
@@ -23,6 +25,74 @@ use defmt_rtt as _;
 use panic_probe as _;
 
 static mut EP_MEMORY: [u32; 1024] = [0; 1024];
+
+enum StepperDriver {
+    Driver1,
+    Driver2,
+}
+struct StepperControl<Dir, Step, NSleepPin, M1Pin, M0Pin, En0Pin, En1Pin> {
+    dir_pin: Dir,
+    step_pin: Step,
+    nsleep_pin: NSleepPin,
+    m1_pin: M1Pin,
+    m0_pin: M0Pin,
+
+    en0_pin: En0Pin,
+    en1_pin: En1Pin,
+}
+
+impl<Dir, Step, NSleep, M1, M0, En0, En1>
+    StepperControl<Dir, Step, NSleep, M1, M0, En0, En1>
+where
+    Dir: OutputPin<Error = Infallible>,
+    Step: OutputPin<Error = Infallible> + ToggleableOutputPin<Error = Infallible>,
+    NSleep: OutputPin<Error = Infallible>,
+    M1: OutputPin<Error = Infallible>,
+    M0: OutputPin<Error = Infallible>,
+    En0: OutputPin<Error = Infallible>,
+    En1: OutputPin<Error = Infallible>,
+{
+    fn step(&mut self) {
+        self.step_pin.toggle();
+    }
+
+    fn init(&mut self) -> Result<(), Infallible> {
+        self.dir_pin.set_low()?;
+        self.step_pin.set_low()?;
+        self.en0_pin.set_low()?;
+        self.en1_pin.set_low()?;
+        self.nsleep_pin.set_high()?;
+        // 1/16th microsteps
+        self.m0_pin.set_high()?;
+        self.m1_pin.set_low()?;
+        Ok(())
+    }
+
+    fn enable_driver(&mut self, driver: StepperDriver) -> Result<(), core::convert::Infallible> {
+        self.nsleep_pin.set_high()?;
+
+        match driver {
+            StepperDriver::Driver1 => {
+                self.en1_pin.set_low()?;
+                self.dir_pin.set_low()?;
+                self.en0_pin.set_high()?;
+
+            }
+            StepperDriver::Driver2 => {
+                self.en0_pin.set_low()?;
+                self.dir_pin.set_high()?;
+                self.en1_pin.set_high()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn disable(&mut self) -> Result<(), Infallible> {
+        self.nsleep_pin.set_low()?;
+        self.en0_pin.set_low()?;
+        self.en1_pin.set_low()
+    }
+}
 
 #[entry]
 fn main() -> ! {
@@ -62,6 +132,18 @@ fn main() -> ! {
     let mut m0_pin = gpiob.pb1.into_push_pull_output();
     m0_pin.set_high();
     m1_pin.set_low();
+
+    let mut stepper = StepperControl {
+        dir_pin,
+        step_pin,
+        nsleep_pin,
+        m1_pin,
+        m0_pin,
+        en0_pin,
+        en1_pin,
+    };
+
+    stepper.init().unwrap();
 
     let scl = gpiob
         .pb8
@@ -118,9 +200,12 @@ fn main() -> ! {
 
     let mut delay = stm32f4xx_hal::delay::Delay::new(cp.SYST, &clocks);
     let mut delay_us = 200_u32;
-    en0_pin.set_high();
+
+    stepper.enable_driver(StepperDriver::Driver1);
+
     loop {
-        step_pin.toggle();
+        stepper.step();
+
         delay.delay_us(delay_us);
         if delay_us > 40_u32 {
             delay_us -= 1;

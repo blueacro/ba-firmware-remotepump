@@ -27,7 +27,7 @@ Firmware for a stepper pump auto water change hub
 - PA14 37 SWCLK
 
 - PB0 18 M1
-- PB1 19 PB1
+- PB1 19 M0
 - PB3 39 SWO
 - PB4 40 nFAULT1
 - PB5 41 nFAULT2
