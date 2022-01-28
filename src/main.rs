@@ -6,6 +6,7 @@ use core::fmt::Error;
 
 use cortex_m_rt::entry;
 use stm32f4xx_hal::hal::digital::v2::{OutputPin, ToggleableOutputPin};
+use stm32f4xx_hal::pac::{interrupt, Interrupt};
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
 use stm32f4xx_hal::{i2c::I2c, pac, prelude::*};
 
@@ -118,20 +119,13 @@ fn main() -> ! {
     led2.set_low();
 
     // Stepper control
-    let mut dir_pin = gpioa.pa4.into_push_pull_output();
-    dir_pin.set_low();
-    let mut step_pin = gpioa.pa5.into_push_pull_output();
-    step_pin.set_low();
-    let mut en0_pin = gpioa.pa6.into_push_pull_output();
-    en0_pin.set_low();
-    let mut en1_pin = gpioa.pa7.into_push_pull_output();
-    en1_pin.set_low();
-    let mut nsleep_pin = gpioa.pa8.into_push_pull_output();
-    nsleep_pin.set_high();
-    let mut m1_pin = gpiob.pb0.into_push_pull_output();
-    let mut m0_pin = gpiob.pb1.into_push_pull_output();
-    m0_pin.set_high();
-    m1_pin.set_low();
+    let dir_pin = gpioa.pa4.into_push_pull_output();
+    let step_pin = gpioa.pa5.into_push_pull_output();
+    let en0_pin = gpioa.pa6.into_push_pull_output();
+    let en1_pin = gpioa.pa7.into_push_pull_output();
+    let nsleep_pin = gpioa.pa8.into_push_pull_output();
+    let m1_pin = gpiob.pb0.into_push_pull_output();
+    let m0_pin = gpiob.pb1.into_push_pull_output();
 
     let mut stepper = StepperControl {
         dir_pin,
@@ -201,7 +195,9 @@ fn main() -> ! {
     let mut delay = stm32f4xx_hal::delay::Delay::new(cp.SYST, &clocks);
     let mut delay_us = 200_u32;
 
-    stepper.enable_driver(StepperDriver::Driver1);
+    unsafe { cortex_m::peripheral::NVIC::unmask(Interrupt::OTG_FS); }
+
+    stepper.enable_driver(StepperDriver::Driver1).unwrap();
 
     loop {
         stepper.step();
@@ -240,6 +236,11 @@ fn main() -> ! {
             _ => {}
         }
     }
+}
+
+#[interrupt]
+fn OTG_FS() {
+
 }
 
 // same panicking *behavior* as `panic-probe` but doesn't print a panic message
