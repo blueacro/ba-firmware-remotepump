@@ -1,16 +1,21 @@
 #![no_std]
 #![no_main]
 
+use core::cell::RefCell;
 use core::convert::Infallible;
-use core::fmt::Error;
+use core::ops::DerefMut;
 
+use cortex_m::interrupt::free as int_free;
+use cortex_m::interrupt::Mutex;
 use cortex_m_rt::entry;
-use stm32f4xx_hal::hal::digital::v2::{OutputPin, ToggleableOutputPin};
-use stm32f4xx_hal::pac::{interrupt, Interrupt};
+use stm32f4xx_hal::gpio::{Alternate, Pin, PushPull};
+use stm32f4xx_hal::hal::digital::v2::OutputPin;
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
+use stm32f4xx_hal::pac::{interrupt, Interrupt};
+use stm32f4xx_hal::rcc::Clocks;
+use stm32f4xx_hal::time::Hertz;
 use stm32f4xx_hal::{i2c::I2c, pac, prelude::*};
 
-use embedded_graphics::{image::Image, image::ImageRaw};
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
     pixelcolor::BinaryColor,
@@ -26,40 +31,34 @@ use defmt_rtt as _;
 use panic_probe as _;
 
 static mut EP_MEMORY: [u32; 1024] = [0; 1024];
+static TIM2CC: Mutex<RefCell<Option<Tim2CC>>> = Mutex::new(RefCell::new(None));
 
 enum StepperDriver {
     Driver1,
     Driver2,
 }
-struct StepperControl<Dir, Step, NSleepPin, M1Pin, M0Pin, En0Pin, En1Pin> {
+struct StepperControl<Dir, NSleepPin, M1Pin, M0Pin, En0Pin, En1Pin> {
     dir_pin: Dir,
-    step_pin: Step,
     nsleep_pin: NSleepPin,
     m1_pin: M1Pin,
     m0_pin: M0Pin,
 
     en0_pin: En0Pin,
     en1_pin: En1Pin,
+    tim2_cc: &'static Mutex<RefCell<Option<Tim2CC>>>,
 }
 
-impl<Dir, Step, NSleep, M1, M0, En0, En1>
-    StepperControl<Dir, Step, NSleep, M1, M0, En0, En1>
+impl<Dir, NSleep, M1, M0, En0, En1> StepperControl<Dir, NSleep, M1, M0, En0, En1>
 where
     Dir: OutputPin<Error = Infallible>,
-    Step: OutputPin<Error = Infallible> + ToggleableOutputPin<Error = Infallible>,
     NSleep: OutputPin<Error = Infallible>,
     M1: OutputPin<Error = Infallible>,
     M0: OutputPin<Error = Infallible>,
     En0: OutputPin<Error = Infallible>,
     En1: OutputPin<Error = Infallible>,
 {
-    fn step(&mut self) {
-        self.step_pin.toggle();
-    }
-
     fn init(&mut self) -> Result<(), Infallible> {
         self.dir_pin.set_low()?;
-        self.step_pin.set_low()?;
         self.en0_pin.set_low()?;
         self.en1_pin.set_low()?;
         self.nsleep_pin.set_high()?;
@@ -77,7 +76,6 @@ where
                 self.en1_pin.set_low()?;
                 self.dir_pin.set_low()?;
                 self.en0_pin.set_high()?;
-
             }
             StepperDriver::Driver2 => {
                 self.en0_pin.set_low()?;
@@ -88,11 +86,93 @@ where
         Ok(())
     }
 
+    fn set_speed(&mut self, speed: Hertz) {
+        int_free(|cs| {
+            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
+                tim2.enable(speed);
+            }
+        });
+    }
+
     fn disable(&mut self) -> Result<(), Infallible> {
         self.nsleep_pin.set_low()?;
         self.en0_pin.set_low()?;
         self.en1_pin.set_low()
     }
+}
+
+struct Tim2CC {
+    timer: stm32f4xx_hal::pac::TIM2,
+    rate: Hertz,
+    current_speed: Hertz,
+    target_speed: Hertz,
+}
+
+impl Tim2CC {
+    fn new(timer: stm32f4xx_hal::pac::TIM2, clocks: &Clocks) -> Self {
+        use stm32f4xx_hal::rcc::BusTimerClock;
+        unsafe {
+            use stm32f4xx_hal::rcc::Enable;
+            use stm32f4xx_hal::rcc::Reset;
+            let rcc = &(*stm32f4xx_hal::pac::RCC::ptr());
+            stm32f4xx_hal::pac::TIM2::enable(rcc);
+            stm32f4xx_hal::pac::TIM2::reset(rcc);
+        }
+        timer.psc.modify(|_, w| w.psc().bits(0_u16));
+        timer.ccmr1_output().write(|w| w.oc1m().toggle());
+        timer.ccer.modify(|_, w| w.cc1e().set_bit());
+
+        let rate = stm32f4xx_hal::pac::TIM2::timer_clock(clocks);
+        Self {
+            timer,
+            rate,
+            target_speed: 0_u32.hz(),
+            current_speed: 0_u32.hz(),
+        }
+    }
+
+    fn enable(&mut self, rate: Hertz) {
+        self.target_speed = rate;
+        // Enable interrupt
+        self.timer.dier.modify(|_, w| w.cc1ie().set_bit());
+        self.handle_int();
+        self.timer.cr1.modify(|_, w| w.cen().set_bit());
+    }
+
+    fn handle_int(&mut self) {
+        if self.current_speed < self.target_speed {
+            self.current_speed.0 += 20;
+        } else if self.current_speed > self.target_speed {
+            self.current_speed.0 -= 20;
+        } else {
+            // If we've reached the target speed, disable the interrupt
+            self.timer.dier.modify(|_, w| w.cc1ie().clear_bit());
+        }
+        // Set a minimum time to allow ramping to not be very slow
+        if self.target_speed != 0.hz() && self.current_speed < 10.hz() {
+            self.current_speed = 100.hz();
+        }
+        if self.current_speed == 0.hz() {
+            self.timer.cr1.modify(|_, w| w.cen().clear_bit());
+            self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
+            return;
+        }
+        let freq_timer: u32 = self.rate.0;
+        let ticks = (freq_timer / self.current_speed.0);
+        self.timer.arr.write(|w| w.arr().bits(ticks));
+        self.timer.ccr1.write(|w| w.ccr().bits(ticks));
+        self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
+    }
+}
+
+#[interrupt]
+fn TIM2() {
+    cortex_m::peripheral::NVIC::unpend(Interrupt::TIM2);
+    int_free(|cs| {
+        if let Some(ref mut tim2) = TIM2CC.borrow(cs).borrow_mut().deref_mut() {
+            tim2.handle_int();
+        }
+    });
 }
 
 #[entry]
@@ -120,21 +200,23 @@ fn main() -> ! {
 
     // Stepper control
     let dir_pin = gpioa.pa4.into_push_pull_output();
-    let step_pin = gpioa.pa5.into_push_pull_output();
+    let _step_pin: Pin<Alternate<PushPull, 1>, 'A', 5> = gpioa.pa5.into_alternate();
     let en0_pin = gpioa.pa6.into_push_pull_output();
     let en1_pin = gpioa.pa7.into_push_pull_output();
     let nsleep_pin = gpioa.pa8.into_push_pull_output();
     let m1_pin = gpiob.pb0.into_push_pull_output();
     let m0_pin = gpiob.pb1.into_push_pull_output();
 
+    let mut tim2 = Tim2CC::new(dp.TIM2, &clocks);
+    int_free(|cs| TIM2CC.borrow(cs).replace(Some(tim2)));
     let mut stepper = StepperControl {
         dir_pin,
-        step_pin,
         nsleep_pin,
         m1_pin,
         m0_pin,
         en0_pin,
         en1_pin,
+        tim2_cc: &TIM2CC,
     };
 
     stepper.init().unwrap();
@@ -193,23 +275,39 @@ fn main() -> ! {
         .build();
 
     let mut delay = stm32f4xx_hal::delay::Delay::new(cp.SYST, &clocks);
-    let mut delay_us = 200_u32;
+    let mut flip = false;
 
-    unsafe { cortex_m::peripheral::NVIC::unmask(Interrupt::OTG_FS); }
+    cortex_m::peripheral::NVIC::unpend(Interrupt::TIM2);
+    unsafe {
+        cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2);
+    }
 
-    stepper.enable_driver(StepperDriver::Driver1).unwrap();
+    stepper.enable_driver(StepperDriver::Driver2).unwrap();
 
     loop {
-        stepper.step();
+        stepper.set_speed(400.hz());
+        delay.delay_ms(1000_u32);
+        stepper.set_speed(800.hz());
+        delay.delay_ms(1000_u32);
+        stepper.set_speed(400.hz());
+        delay.delay_ms(1000_u32);
 
-        delay.delay_us(delay_us);
-        if delay_us > 40_u32 {
-            delay_us -= 1;
+        stepper.set_speed(100.hz());
+        delay.delay_ms(1000_u32);
+        stepper.set_speed(0.hz());
+        delay.delay_ms(1000_u32);
+        if flip {
+            stepper.enable_driver(StepperDriver::Driver2).unwrap();
+            flip = false;
+        } else {
+            stepper.enable_driver(StepperDriver::Driver1).unwrap();
+            flip = true;
         }
-
         if !usb_dev.poll(&mut [&mut serial]) {
             continue;
         }
+
+
 
         let mut buf = [0u8; 64];
 
@@ -239,9 +337,7 @@ fn main() -> ! {
 }
 
 #[interrupt]
-fn OTG_FS() {
-
-}
+fn OTG_FS() {}
 
 // same panicking *behavior* as `panic-probe` but doesn't print a panic message
 // this prevents the panic message being printed *twice* when `defmt::panic` is invoked
