@@ -126,8 +126,8 @@ impl Tim2CC {
         Self {
             timer,
             rate,
-            target_speed: 0_u32.hz(),
-            current_speed: 0_u32.hz(),
+            target_speed: 0_u32.Hz(),
+            current_speed: 0_u32.Hz(),
         }
     }
 
@@ -140,25 +140,29 @@ impl Tim2CC {
     }
 
     fn handle_int(&mut self) {
+        let adjust: Hertz = 20.Hz();
         if self.current_speed < self.target_speed {
-            self.current_speed.0 += 20;
+            self.current_speed += 20.Hz();
         } else if self.current_speed > self.target_speed {
-            self.current_speed.0 -= 20;
+            self.current_speed = self
+                .current_speed
+                .checked_sub(adjust)
+                .unwrap_or_else(|| 0.Hz());
         } else {
             // If we've reached the target speed, disable the interrupt
             self.timer.dier.modify(|_, w| w.cc1ie().clear_bit());
         }
         // Set a minimum time to allow ramping to not be very slow
-        if self.target_speed != 0.hz() && self.current_speed < 10.hz() {
-            self.current_speed = 100.hz();
+        if self.target_speed.to_Hz() != 0 && self.current_speed.to_Hz() < 10 {
+            self.current_speed = 100.Hz();
         }
-        if self.current_speed == 0.hz() {
+        if self.current_speed.to_Hz() == 0 {
             self.timer.cr1.modify(|_, w| w.cen().clear_bit());
             self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
             return;
         }
-        let freq_timer: u32 = self.rate.0;
-        let ticks = (freq_timer / self.current_speed.0);
+        let freq_timer: u32 = self.rate.raw();
+        let ticks = (freq_timer / self.current_speed.raw());
         self.timer.arr.write(|w| w.arr().bits(ticks));
         self.timer.ccr1.write(|w| w.ccr().bits(ticks));
         self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
@@ -184,8 +188,8 @@ fn main() -> ! {
 
     let clocks = rcc
         .cfgr
-        .use_hse(12.mhz())
-        .sysclk(48.mhz())
+        .use_hse(12.MHz())
+        .sysclk(48.MHz())
         .require_pll48clk()
         .freeze();
 
@@ -200,7 +204,7 @@ fn main() -> ! {
 
     // Stepper control
     let dir_pin = gpioa.pa4.into_push_pull_output();
-    let _step_pin: Pin<Alternate<PushPull, 1>, 'A', 5> = gpioa.pa5.into_alternate();
+    let _step_pin: Pin<'A', 5, Alternate<1, PushPull>> = gpioa.pa5.into_alternate();
     let en0_pin = gpioa.pa6.into_push_pull_output();
     let en1_pin = gpioa.pa7.into_push_pull_output();
     let nsleep_pin = gpioa.pa8.into_push_pull_output();
@@ -231,7 +235,7 @@ fn main() -> ! {
         .into_alternate()
         .internal_pull_up(true)
         .set_open_drain();
-    let i2c = I2c::new(dp.I2C1, (scl, sda), 400.khz(), &clocks);
+    let i2c = I2c::new(dp.I2C1, (scl, sda), 400.kHz(), &clocks);
 
     let mut display: GraphicsMode<_> = Builder::new().connect_i2c(i2c).into();
 
@@ -274,7 +278,7 @@ fn main() -> ! {
         .device_class(usbd_serial::USB_CLASS_CDC)
         .build();
 
-    let mut delay = stm32f4xx_hal::delay::Delay::new(cp.SYST, &clocks);
+    let mut delay = cp.SYST.delay(&clocks);
     let mut flip = false;
 
     cortex_m::peripheral::NVIC::unpend(Interrupt::TIM2);
@@ -285,16 +289,16 @@ fn main() -> ! {
     stepper.enable_driver(StepperDriver::Driver2).unwrap();
 
     loop {
-        stepper.set_speed(400.hz());
+        stepper.set_speed(400.Hz());
         delay.delay_ms(1000_u32);
-        stepper.set_speed(800.hz());
+        stepper.set_speed(800.Hz());
         delay.delay_ms(1000_u32);
-        stepper.set_speed(400.hz());
+        stepper.set_speed(400.Hz());
         delay.delay_ms(1000_u32);
 
-        stepper.set_speed(100.hz());
+        stepper.set_speed(100.Hz());
         delay.delay_ms(1000_u32);
-        stepper.set_speed(0.hz());
+        stepper.set_speed(0.Hz());
         delay.delay_ms(1000_u32);
         if flip {
             stepper.enable_driver(StepperDriver::Driver2).unwrap();
@@ -306,8 +310,6 @@ fn main() -> ! {
         if !usb_dev.poll(&mut [&mut serial]) {
             continue;
         }
-
-
 
         let mut buf = [0u8; 64];
 
