@@ -164,7 +164,7 @@ impl Tim2CC {
         let freq_timer: u32 = self.rate.raw();
         let ticks = (freq_timer / self.current_speed.raw());
         self.timer.arr.write(|w| w.arr().bits(ticks));
-        self.timer.ccr1.write(|w| w.ccr().bits(ticks));
+        self.timer.ccr1().write(|w| w.ccr().bits(ticks));
         self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
     }
 }
