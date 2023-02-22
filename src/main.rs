@@ -237,6 +237,26 @@ fn main() -> ! {
         .set_open_drain();
     let i2c = I2c::new(dp.I2C1, (scl, sda), 400.kHz(), &clocks);
 
+    let usb = USB {
+        usb_global: dp.OTG_FS_GLOBAL,
+        usb_device: dp.OTG_FS_DEVICE,
+        usb_pwrclk: dp.OTG_FS_PWRCLK,
+        pin_dm: gpioa.pa11.into_alternate(),
+        pin_dp: gpioa.pa12.into_alternate(),
+        hclk: clocks.hclk(),
+    };
+
+    let usb_bus = UsbBus::new(usb, unsafe { &mut EP_MEMORY });
+
+    let mut serial = usbd_serial::SerialPort::new(&usb_bus);
+
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
+        .manufacturer("blueAcro")
+        .product("RemotePump")
+        .serial_number("TEST")
+        .device_class(usbd_serial::USB_CLASS_CDC)
+        .build();
+
     let mut display: GraphicsMode<_> = Builder::new().connect_i2c(i2c).into();
 
     display.init().unwrap();
@@ -257,26 +277,6 @@ fn main() -> ! {
         .unwrap();
 
     display.flush().unwrap();
-
-    let usb = USB {
-        usb_global: dp.OTG_FS_GLOBAL,
-        usb_device: dp.OTG_FS_DEVICE,
-        usb_pwrclk: dp.OTG_FS_PWRCLK,
-        pin_dm: gpioa.pa11.into_alternate(),
-        pin_dp: gpioa.pa12.into_alternate(),
-        hclk: clocks.hclk(),
-    };
-
-    let usb_bus = UsbBus::new(usb, unsafe { &mut EP_MEMORY });
-
-    let mut serial = usbd_serial::SerialPort::new(&usb_bus);
-
-    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
-        .manufacturer("blueAcro")
-        .product("RemotePump")
-        .serial_number("TEST")
-        .device_class(usbd_serial::USB_CLASS_CDC)
-        .build();
 
     let mut delay = cp.SYST.delay(&clocks);
     let mut flip = false;
