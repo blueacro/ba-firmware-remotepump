@@ -2,10 +2,13 @@
 #![no_main]
 
 pub mod display;
+pub mod stepper;
+use embedded_graphics::mono_font::ascii::FONT_10X20;
+use stepper::Tim2CC;
+use stepper::StepperDriver;
+use stepper::StepperControl;
 
 use core::cell::RefCell;
-use core::cmp::Ordering;
-use core::convert::Infallible;
 use core::ops::DerefMut;
 
 use cortex_m::interrupt::free as int_free;
@@ -14,9 +17,9 @@ use cortex_m_rt::entry;
 use stm32f4xx_hal::gpio::{Alternate, Pin, PushPull};
 use stm32f4xx_hal::hal::digital::v2::OutputPin;
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
+
 use stm32f4xx_hal::pac::{interrupt, Interrupt};
-use stm32f4xx_hal::rcc::Clocks;
-use stm32f4xx_hal::time::Hertz;
+
 use stm32f4xx_hal::{i2c::I2c, pac, prelude::*};
 
 use embedded_graphics::{
@@ -35,180 +38,6 @@ use panic_probe as _;
 
 static mut EP_MEMORY: [u32; 1024] = [0; 1024];
 static TIM2CC: Mutex<RefCell<Option<Tim2CC>>> = Mutex::new(RefCell::new(None));
-
-enum StepperDriver {
-    Driver1,
-    Driver2,
-}
-struct StepperControl<Dir, NSleepPin, M1Pin, M0Pin, En0Pin, En1Pin> {
-    dir_pin: Dir,
-    nsleep_pin: NSleepPin,
-    m1_pin: M1Pin,
-    m0_pin: M0Pin,
-
-    en0_pin: En0Pin,
-    en1_pin: En1Pin,
-    tim2_cc: &'static Mutex<RefCell<Option<Tim2CC>>>,
-}
-
-impl<Dir, NSleep, M1, M0, En0, En1> StepperControl<Dir, NSleep, M1, M0, En0, En1>
-where
-    Dir: OutputPin<Error = Infallible>,
-    NSleep: OutputPin<Error = Infallible>,
-    M1: OutputPin<Error = Infallible>,
-    M0: OutputPin<Error = Infallible>,
-    En0: OutputPin<Error = Infallible>,
-    En1: OutputPin<Error = Infallible>,
-{
-    fn init(&mut self) -> Result<(), Infallible> {
-        self.dir_pin.set_low()?;
-        self.en0_pin.set_low()?;
-        self.en1_pin.set_low()?;
-        self.nsleep_pin.set_high()?;
-        // 1/16th microsteps
-        self.m0_pin.set_high()?;
-        self.m1_pin.set_low()?;
-        Ok(())
-    }
-
-    fn enable_driver(&mut self, driver: StepperDriver) -> Result<(), core::convert::Infallible> {
-        self.nsleep_pin.set_high()?;
-
-        match driver {
-            StepperDriver::Driver1 => {
-                self.en1_pin.set_low()?;
-                self.dir_pin.set_low()?;
-                self.en0_pin.set_high()?;
-            }
-            StepperDriver::Driver2 => {
-                self.en0_pin.set_low()?;
-                self.dir_pin.set_high()?;
-                self.en1_pin.set_high()?;
-            }
-        }
-        Ok(())
-    }
-
-    fn set_speed(&mut self, speed: Hertz) {
-        int_free(|cs| {
-            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
-                tim2.enable(speed);
-            }
-        });
-    }
-
-    fn set_speed_steps(&mut self, speed: Hertz, steps: u64) {
-        int_free(|cs| {
-            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
-                tim2.enable_steps(speed, steps);
-            }
-        });
-    }
-
-    fn disable(&mut self) -> Result<(), Infallible> {
-        self.nsleep_pin.set_low()?;
-        self.en0_pin.set_low()?;
-        self.en1_pin.set_low()
-    }
-}
-
-struct Tim2CC {
-    timer: stm32f4xx_hal::pac::TIM2,
-    rate: Hertz,
-    current_speed: Hertz,
-    target_speed: Hertz,
-    steps: Option<u64>,
-}
-
-impl Tim2CC {
-    fn new(timer: stm32f4xx_hal::pac::TIM2, clocks: &Clocks) -> Self {
-        use stm32f4xx_hal::rcc::BusTimerClock;
-        unsafe {
-            use stm32f4xx_hal::rcc::Enable;
-            use stm32f4xx_hal::rcc::Reset;
-            let rcc = &(*stm32f4xx_hal::pac::RCC::ptr());
-            stm32f4xx_hal::pac::TIM2::enable(rcc);
-            stm32f4xx_hal::pac::TIM2::reset(rcc);
-        }
-        timer.psc.modify(|_, w| w.psc().bits(0_u16));
-        timer.ccmr1_output().write(|w| w.oc1m().toggle());
-        timer.ccer.modify(|_, w| w.cc1e().set_bit());
-
-        let rate = stm32f4xx_hal::pac::TIM2::timer_clock(clocks);
-        Self {
-            timer,
-            rate,
-            target_speed: 0_u32.Hz(),
-            current_speed: 0_u32.Hz(),
-            steps: None,
-        }
-    }
-
-    fn enable(&mut self, rate: Hertz) {
-        self.target_speed = rate;
-        // Enable interrupt
-        self.timer.dier.modify(|_, w| w.cc1ie().set_bit());
-        self.handle_int();
-        self.timer.cr1.modify(|_, w| w.cen().set_bit());
-    }
-
-    fn enable_steps(&mut self, rate: Hertz, steps: u64) {
-        self.steps = Some(steps);
-        self.enable(rate);
-    }
-
-    fn handle_int(&mut self) {
-        let adjust: Hertz = 20.Hz();
-        match self.current_speed.cmp(&self.target_speed) {
-            Ordering::Less => {
-                self.current_speed += 20.Hz();
-            }
-            Ordering::Greater => {
-                self.current_speed = self
-                    .current_speed
-                    .checked_sub(adjust)
-                    .unwrap_or_else(|| 0.Hz());
-            }
-            _ => {
-                // Don't disable the interrupt to account for tracking rotations
-
-                // If we've reached the target speed, disable the interrupt
-                self.timer.dier.modify(|_, w| w.cc1ie().clear_bit());
-            }
-        }
-
-        //
-        // Set a minimum time to allow ramping to not be very slow
-        if self.target_speed.to_Hz() != 0 && self.current_speed.to_Hz() < 10 {
-            self.current_speed = 100.Hz();
-        }
-
-        // Bail if we are actually at 0
-        if self.current_speed.to_Hz() == 0 {
-            self.timer.cr1.modify(|_, w| w.cen().clear_bit());
-            self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
-            return;
-        }
-
-        let freq_timer: u32 = self.rate.raw();
-        let ticks = freq_timer
-            .checked_mul(self.current_speed.raw())
-            .unwrap_or(1);
-
-        if let Some(steps_left) = self.steps {
-            if steps_left <= ticks as u64 {
-                self.target_speed = 0.Hz();
-                self.steps = None;
-            } else {
-                self.steps = Some(steps_left - ticks as u64)
-            }
-        }
-
-        self.timer.arr.write(|w| w.arr().bits(ticks));
-        self.timer.ccr1().write(|w| w.ccr().bits(ticks));
-        self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
-    }
-}
 
 #[interrupt]
 fn TIM2() {
@@ -262,6 +91,7 @@ fn main() -> ! {
         en0_pin,
         en1_pin,
         tim2_cc: &TIM2CC,
+        driver_enabled: None,
     };
 
     stepper.init().unwrap();
@@ -305,7 +135,7 @@ fn main() -> ! {
     display.flush().unwrap();
 
     let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_6X10)
+        .font(&FONT_10X20)
         .text_color(BinaryColor::On)
         .build();
 
@@ -320,19 +150,26 @@ fn main() -> ! {
     display.flush().unwrap();
 
     let mut delay = cp.SYST.delay(&clocks);
-    let mut flip = false;
 
     cortex_m::peripheral::NVIC::unpend(Interrupt::TIM2);
     unsafe {
         cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2);
     }
 
-    stepper.enable_driver(StepperDriver::Driver2).unwrap();
+    stepper.enable_driver(&StepperDriver::Driver2).unwrap();
 
     loop {
-        //stepper.set_speed_steps(100.Hz(), 65535*1024);
-        stepper.set_speed(400.Hz());
-        delay.delay_ms(10000_u32);
+        
+        if stepper.is_running() {
+
+        } else {
+            let _ = stepper.disable();
+            delay.delay_ms(10000_u32);
+            stepper.enable_driver(&StepperDriver::Driver2).unwrap();
+
+            stepper.set_speed_steps(9900.Hz(), 1024*6);
+        }
+
 
         if !usb_dev.poll(&mut [&mut serial]) {
             continue;
