@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
+pub mod display;
+
 use core::cell::RefCell;
+use core::cmp::Ordering;
 use core::convert::Infallible;
 use core::ops::DerefMut;
 
@@ -94,6 +97,14 @@ where
         });
     }
 
+    fn set_speed_steps(&mut self, speed: Hertz, steps: u64) {
+        int_free(|cs| {
+            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
+                tim2.enable_steps(speed, steps);
+            }
+        });
+    }
+
     fn disable(&mut self) -> Result<(), Infallible> {
         self.nsleep_pin.set_low()?;
         self.en0_pin.set_low()?;
@@ -106,6 +117,7 @@ struct Tim2CC {
     rate: Hertz,
     current_speed: Hertz,
     target_speed: Hertz,
+    steps: Option<u64>,
 }
 
 impl Tim2CC {
@@ -128,6 +140,7 @@ impl Tim2CC {
             rate,
             target_speed: 0_u32.Hz(),
             current_speed: 0_u32.Hz(),
+            steps: None,
         }
     }
 
@@ -139,30 +152,58 @@ impl Tim2CC {
         self.timer.cr1.modify(|_, w| w.cen().set_bit());
     }
 
+    fn enable_steps(&mut self, rate: Hertz, steps: u64) {
+        self.steps = Some(steps);
+        self.enable(rate);
+    }
+
     fn handle_int(&mut self) {
         let adjust: Hertz = 20.Hz();
-        if self.current_speed < self.target_speed {
-            self.current_speed += 20.Hz();
-        } else if self.current_speed > self.target_speed {
-            self.current_speed = self
-                .current_speed
-                .checked_sub(adjust)
-                .unwrap_or_else(|| 0.Hz());
-        } else {
-            // If we've reached the target speed, disable the interrupt
-            self.timer.dier.modify(|_, w| w.cc1ie().clear_bit());
+        match self.current_speed.cmp(&self.target_speed) {
+            Ordering::Less => {
+                self.current_speed += 20.Hz();
+            }
+            Ordering::Greater => {
+                self.current_speed = self
+                    .current_speed
+                    .checked_sub(adjust)
+                    .unwrap_or_else(|| 0.Hz());
+            }
+            _ => {
+                // Don't disable the interrupt to account for tracking rotations
+
+                // If we've reached the target speed, disable the interrupt
+                self.timer.dier.modify(|_, w| w.cc1ie().clear_bit());
+            }
         }
+
+        //
         // Set a minimum time to allow ramping to not be very slow
         if self.target_speed.to_Hz() != 0 && self.current_speed.to_Hz() < 10 {
             self.current_speed = 100.Hz();
         }
+
+        // Bail if we are actually at 0
         if self.current_speed.to_Hz() == 0 {
             self.timer.cr1.modify(|_, w| w.cen().clear_bit());
             self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
             return;
         }
+
         let freq_timer: u32 = self.rate.raw();
-        let ticks = (freq_timer / self.current_speed.raw());
+        let ticks = freq_timer
+            .checked_mul(self.current_speed.raw())
+            .unwrap_or(1);
+
+        if let Some(steps_left) = self.steps {
+            if steps_left <= ticks as u64 {
+                self.target_speed = 0.Hz();
+                self.steps = None;
+            } else {
+                self.steps = Some(steps_left - ticks as u64)
+            }
+        }
+
         self.timer.arr.write(|w| w.arr().bits(ticks));
         self.timer.ccr1().write(|w| w.ccr().bits(ticks));
         self.timer.sr.modify(|_, w| w.cc1if().clear_bit());
@@ -289,24 +330,10 @@ fn main() -> ! {
     stepper.enable_driver(StepperDriver::Driver2).unwrap();
 
     loop {
+        //stepper.set_speed_steps(100.Hz(), 65535*1024);
         stepper.set_speed(400.Hz());
-        delay.delay_ms(1000_u32);
-        stepper.set_speed(800.Hz());
-        delay.delay_ms(1000_u32);
-        stepper.set_speed(400.Hz());
-        delay.delay_ms(1000_u32);
+        delay.delay_ms(10000_u32);
 
-        stepper.set_speed(100.Hz());
-        delay.delay_ms(1000_u32);
-        stepper.set_speed(0.Hz());
-        delay.delay_ms(1000_u32);
-        if flip {
-            stepper.enable_driver(StepperDriver::Driver2).unwrap();
-            flip = false;
-        } else {
-            stepper.enable_driver(StepperDriver::Driver1).unwrap();
-            flip = true;
-        }
         if !usb_dev.poll(&mut [&mut serial]) {
             continue;
         }
