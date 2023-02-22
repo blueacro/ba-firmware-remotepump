@@ -3,10 +3,12 @@
 
 pub mod display;
 pub mod stepper;
+pub mod usb;
+
 use embedded_graphics::mono_font::ascii::FONT_10X20;
-use stepper::Tim2CC;
-use stepper::StepperDriver;
 use stepper::StepperControl;
+use stepper::StepperDriver;
+use stepper::Tim2CC;
 
 use core::cell::RefCell;
 use core::ops::DerefMut;
@@ -36,7 +38,6 @@ use usb_device::prelude::*;
 use defmt_rtt as _;
 use panic_probe as _;
 
-static mut EP_MEMORY: [u32; 1024] = [0; 1024];
 static TIM2CC: Mutex<RefCell<Option<Tim2CC>>> = Mutex::new(RefCell::new(None));
 
 #[interrupt]
@@ -117,16 +118,8 @@ fn main() -> ! {
         hclk: clocks.hclk(),
     };
 
-    let usb_bus = UsbBus::new(usb, unsafe { &mut EP_MEMORY });
-
-    let mut serial = usbd_serial::SerialPort::new(&usb_bus);
-
-    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
-        .manufacturer("blueAcro")
-        .product("RemotePump")
-        .serial_number("TEST")
-        .device_class(usbd_serial::USB_CLASS_CDC)
-        .build();
+    let usb_bus = UsbBus::new(usb, unsafe { &mut usb::EP_MEMORY });
+    let mut usb_ser = usb::UsbSerialTask::new(&usb_bus);
 
     let mut display: GraphicsMode<_> = Builder::new().connect_i2c(i2c).into();
 
@@ -159,46 +152,16 @@ fn main() -> ! {
     stepper.enable_driver(&StepperDriver::Driver2).unwrap();
 
     loop {
-        
         if stepper.is_running() {
-
         } else {
             let _ = stepper.disable();
             delay.delay_ms(10000_u32);
             stepper.enable_driver(&StepperDriver::Driver2).unwrap();
 
-            stepper.set_speed_steps(9900.Hz(), 1024*6);
+            stepper.set_speed_steps(9900.Hz(), 1024 * 6);
         }
 
-
-        if !usb_dev.poll(&mut [&mut serial]) {
-            continue;
-        }
-
-        let mut buf = [0u8; 64];
-
-        match serial.read(&mut buf) {
-            Ok(count) if count > 0 => {
-                defmt::println!("{}", buf);
-                // Echo back in upper case
-                for c in buf[0..count].iter_mut() {
-                    if 0x61 <= *c && *c <= 0x7a {
-                        *c &= !0x20;
-                    }
-                }
-
-                let mut write_offset = 0;
-                while write_offset < count {
-                    match serial.write(&buf[write_offset..count]) {
-                        Ok(len) if len > 0 => {
-                            write_offset += len;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
+        usb_ser.usb_task();
     }
 }
 
