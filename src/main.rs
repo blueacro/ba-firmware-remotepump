@@ -1,44 +1,83 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
+
+extern crate alloc;
 
 pub mod display;
+pub mod sm;
 pub mod stepper;
 pub mod usb;
 
-use embedded_graphics::mono_font::ascii::FONT_10X20;
-use stepper::StepperControl;
-use stepper::StepperDriver;
+use sh1106::interface::DisplayInterface;
 use stepper::Tim2CC;
+use stepper::TimerControl;
 
 use core::cell::RefCell;
+use core::fmt::Binary;
 use core::ops::DerefMut;
 
 use cortex_m::interrupt::free as int_free;
 use cortex_m::interrupt::Mutex;
 use cortex_m_rt::entry;
 use stm32f4xx_hal::gpio::{Alternate, Pin, PushPull};
-use stm32f4xx_hal::hal::digital::v2::OutputPin;
+
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
 
 use stm32f4xx_hal::pac::{interrupt, Interrupt};
 
 use stm32f4xx_hal::{i2c::I2c, pac, prelude::*};
 
-use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
-    pixelcolor::BinaryColor,
-    prelude::*,
-    text::{Baseline, Text},
-};
+
 use sh1106::{prelude::*, Builder};
 
-use usb_device::prelude::*;
+use embedded_graphics::{
+    pixelcolor::BinaryColor,
+    prelude::*};
+struct WrappedDisplay<D: DisplayInterface> {
+    display: GraphicsMode<D>
+}
+
+impl<D: DisplayInterface> display::FBDisplay for WrappedDisplay<D> {
+    fn fbclear(&mut self) {
+        self.display.clear()
+    }
+
+    fn flush(&mut self) {
+        let _ = self.display.flush();
+    }
+}
+
+impl<D: DisplayInterface> DrawTarget for WrappedDisplay<D> {
+    type Color = BinaryColor;
+    type Error = core::convert::Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
+        where
+            I: IntoIterator<Item = Pixel<Self::Color>> {
+        self.display.draw_iter(pixels)
+    }
+}
+
+impl<D: DisplayInterface> OriginDimensions for WrappedDisplay<D> {
+    fn size(&self) -> Size {
+        self.display.size()
+    }
+}
+
+
 
 // These lines are part of our setup for debug printing.
 use defmt_rtt as _;
 use panic_probe as _;
 
 static TIM2CC: Mutex<RefCell<Option<Tim2CC>>> = Mutex::new(RefCell::new(None));
+
+use core::alloc::Layout;
+use embedded_alloc::Heap;
+
+#[global_allocator]
+static HEAP: Heap = Heap::empty();
 
 #[interrupt]
 fn TIM2() {
@@ -52,6 +91,13 @@ fn TIM2() {
 
 #[entry]
 fn main() -> ! {
+    {
+        use core::mem::MaybeUninit;
+        const HEAP_SIZE: usize = 1024 * 8;
+        static mut HEAP_MEM: [MaybeUninit<u8>; HEAP_SIZE] = [MaybeUninit::uninit(); HEAP_SIZE];
+        unsafe { HEAP.init(HEAP_MEM.as_ptr() as usize, HEAP_SIZE) }
+    }
+
     let dp = pac::Peripherals::take().unwrap();
     let cp = cortex_m::peripheral::Peripherals::take().unwrap();
 
@@ -84,7 +130,7 @@ fn main() -> ! {
 
     let mut tim2 = Tim2CC::new(dp.TIM2, &clocks);
     int_free(|cs| TIM2CC.borrow(cs).replace(Some(tim2)));
-    let mut stepper = StepperControl {
+    let mut stepper = TimerControl {
         dir_pin,
         nsleep_pin,
         m1_pin,
@@ -121,26 +167,13 @@ fn main() -> ! {
     let usb_bus = UsbBus::new(usb, unsafe { &mut usb::EP_MEMORY });
     let mut usb_ser = usb::UsbSerialTask::new(&usb_bus);
 
-    let mut display: GraphicsMode<_> = Builder::new().connect_i2c(i2c).into();
+    let mut dis: GraphicsMode<_> = Builder::new().connect_i2c(i2c).into();
+    dis.init().unwrap();
 
-    display.init().unwrap();
-    display.clear();
-    display.flush().unwrap();
+    let fbdis = WrappedDisplay { display: dis };
+    let mut display_stack = display::Stack::new(fbdis);
+    display_stack.init();
 
-    let text_style = MonoTextStyleBuilder::new()
-        .font(&FONT_10X20)
-        .text_color(BinaryColor::On)
-        .build();
-
-    Text::with_baseline("Hello world!", Point::zero(), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
-
-    Text::with_baseline("Hello Rust!", Point::new(0, 16), text_style, Baseline::Top)
-        .draw(&mut display)
-        .unwrap();
-
-    display.flush().unwrap();
 
     let mut delay = cp.SYST.delay(&clocks);
 
@@ -149,19 +182,12 @@ fn main() -> ! {
         cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2);
     }
 
-    stepper.enable_driver(&StepperDriver::Driver2).unwrap();
+    let mut app = sm::App::new(stepper);
 
     loop {
-        if stepper.is_running() {
-        } else {
-            let _ = stepper.disable();
-            delay.delay_ms(10000_u32);
-            stepper.enable_driver(&StepperDriver::Driver2).unwrap();
-
-            stepper.set_speed_steps(9900.Hz(), 1024 * 6);
-        }
-
+        app.poll();
         usb_ser.usb_task();
+        delay.delay_us(10);
     }
 }
 
@@ -172,6 +198,11 @@ fn OTG_FS() {}
 // this prevents the panic message being printed *twice* when `defmt::panic` is invoked
 #[defmt::panic_handler]
 fn panic() -> ! {
+    cortex_m::asm::udf()
+}
+
+#[alloc_error_handler]
+fn oom(_: Layout) -> ! {
     cortex_m::asm::udf()
 }
 

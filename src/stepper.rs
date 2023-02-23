@@ -16,11 +16,23 @@ use core::cmp::Ordering;
 use core::convert::Infallible;
 
 #[derive(Clone, Debug)]
-pub enum StepperDriver {
-    Driver1,
-    Driver2,
+pub enum Channel {
+    One,
+    Two,
 }
-pub struct StepperControl<Dir, NSleepPin, M1Pin, M0Pin, En0Pin, En1Pin> {
+
+pub trait Control {
+    fn enable_driver(&mut self, driver: &Channel) -> Result<(), core::convert::Infallible>;
+    fn set_speed(&mut self, speed: Hertz);
+    fn set_speed_steps(&mut self, speed: Hertz, steps: u64);
+    fn is_running(&self) -> bool;
+    fn steps_left(&self) -> Option<u64>;
+    fn disable(&mut self) -> Result<(), Infallible>;
+
+    fn poll(&mut self);
+}
+
+pub struct TimerControl<Dir, NSleepPin, M1Pin, M0Pin, En0Pin, En1Pin> {
     pub dir_pin: Dir,
     pub nsleep_pin: NSleepPin,
     pub m1_pin: M1Pin,
@@ -30,10 +42,94 @@ pub struct StepperControl<Dir, NSleepPin, M1Pin, M0Pin, En0Pin, En1Pin> {
     pub en1_pin: En1Pin,
     pub tim2_cc: &'static Mutex<RefCell<Option<Tim2CC>>>,
 
-    pub driver_enabled: Option<StepperDriver>,
+    pub driver_enabled: Option<Channel>,
 }
 
-impl<Dir, NSleep, M1, M0, En0, En1> StepperControl<Dir, NSleep, M1, M0, En0, En1>
+
+impl<Dir, NSleep, M1, M0, En0, En1> Control for TimerControl<Dir, NSleep, M1, M0, En0, En1>
+where
+    Dir: OutputPin<Error = Infallible>,
+    NSleep: OutputPin<Error = Infallible>,
+    M1: OutputPin<Error = Infallible>,
+    M0: OutputPin<Error = Infallible>,
+    En0: OutputPin<Error = Infallible>,
+    En1: OutputPin<Error = Infallible>,
+{
+
+    fn enable_driver(
+        &mut self,
+        driver: &Channel,
+    ) -> Result<(), core::convert::Infallible> {
+        self.driver_enabled = Some(driver.clone());
+
+        self.nsleep_pin.set_high()?;
+
+        match driver {
+            Channel::One => {
+                self.en1_pin.set_low()?;
+                self.dir_pin.set_low()?;
+                self.en0_pin.set_high()?;
+            }
+            Channel::Two => {
+                self.en0_pin.set_low()?;
+                self.dir_pin.set_high()?;
+                self.en1_pin.set_high()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_speed(&mut self, speed: Hertz) {
+        int_free(|cs| {
+            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
+                tim2.enable(speed);
+            }
+        });
+    }
+
+    fn set_speed_steps(&mut self, speed: Hertz, steps: u64) {
+        int_free(|cs| {
+            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
+                tim2.enable_steps(speed, steps);
+            }
+        });
+    }
+
+    fn is_running(&self) -> bool {
+        let mut _run = false;
+        int_free(|cs| {
+            if let Some(tim2) = self.tim2_cc.borrow(cs).borrow().deref() {
+                _run = tim2.running();
+            }
+        });
+        _run
+    }
+
+    fn steps_left(&self) -> Option<u64> {
+        let mut steps_left: Option<u64> = None;
+        int_free(|cs| {
+            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
+                steps_left = tim2.steps_left()
+            }
+        });
+        steps_left
+    }
+
+    fn disable(&mut self) -> Result<(), Infallible> {
+        self.driver_enabled = None;
+        self.nsleep_pin.set_low()?;
+        self.en0_pin.set_low()?;
+        self.en1_pin.set_low()
+    }
+
+    fn poll(&mut self) {
+        if !self.is_running() {
+            self.disable().unwrap();
+        }
+    }
+}
+
+impl<Dir, NSleep, M1, M0, En0, En1> TimerControl<Dir, NSleep, M1, M0, En0, En1>
 where
     Dir: OutputPin<Error = Infallible>,
     NSleep: OutputPin<Error = Infallible>,
@@ -53,61 +149,6 @@ where
         Ok(())
     }
 
-    pub fn enable_driver(
-        &mut self,
-        driver: &StepperDriver,
-    ) -> Result<(), core::convert::Infallible> {
-        self.driver_enabled = Some(driver.clone());
-
-        self.nsleep_pin.set_high()?;
-
-        match driver {
-            StepperDriver::Driver1 => {
-                self.en1_pin.set_low()?;
-                self.dir_pin.set_low()?;
-                self.en0_pin.set_high()?;
-            }
-            StepperDriver::Driver2 => {
-                self.en0_pin.set_low()?;
-                self.dir_pin.set_high()?;
-                self.en1_pin.set_high()?;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn set_speed(&mut self, speed: Hertz) {
-        int_free(|cs| {
-            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
-                tim2.enable(speed);
-            }
-        });
-    }
-
-    pub fn set_speed_steps(&mut self, speed: Hertz, steps: u64) {
-        int_free(|cs| {
-            if let Some(ref mut tim2) = self.tim2_cc.borrow(cs).borrow_mut().deref_mut() {
-                tim2.enable_steps(speed, steps);
-            }
-        });
-    }
-
-    pub fn is_running(&self) -> bool {
-        let mut _run = false;
-        int_free(|cs| {
-            if let Some(tim2) = self.tim2_cc.borrow(cs).borrow().deref() {
-                _run = tim2.running();
-            }
-        });
-        _run
-    }
-
-    pub fn disable(&mut self) -> Result<(), Infallible> {
-        self.driver_enabled = None;
-        self.nsleep_pin.set_low()?;
-        self.en0_pin.set_low()?;
-        self.en1_pin.set_low()
-    }
 }
 
 pub struct Tim2CC {

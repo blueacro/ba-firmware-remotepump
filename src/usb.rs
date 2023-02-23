@@ -1,7 +1,6 @@
 pub static mut EP_MEMORY: [u32; 1024] = [0; 1024];
 
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
-use stm32f4xx_hal::{i2c::I2c, pac, prelude::*};
 
 use usb_device::class_prelude::UsbBusAllocator;
 use usb_device::prelude::*;
@@ -34,7 +33,7 @@ impl<'a> UsbSerialTask<'a> {
 
         match self.serial.read(&mut buf) {
             Ok(count) if count > 0 => {
-                defmt::println!("{}", buf);
+                defmt::println!("USB Recv {}", buf);
                 // Echo back in upper case
                 for c in buf[0..count].iter_mut() {
                     if 0x61 <= *c && *c <= 0x7a {

@@ -21,6 +21,9 @@ sh1106 = "0.4"
 embedded-graphics =" 0.7"
 display-interface = "*"
 
+# Keep life simple with UI tasks, use an allocator
+embedded-alloc = "*"
+
 # cargo build/run
 [profile.dev]
 codegen-units = 1
