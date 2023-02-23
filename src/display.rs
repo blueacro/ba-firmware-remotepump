@@ -1,4 +1,10 @@
-use core::ops::{Deref, DerefMut};
+use core::{
+    convert::Infallible,
+    fmt::{Binary, Debug},
+};
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use embedded_graphics::{
     mono_font::{ascii::FONT_10X20, MonoTextStyleBuilder},
@@ -14,32 +20,61 @@ pub trait FBDisplay {
     fn flush(&mut self);
 }
 
-pub struct Stack<F: FBDisplay + DrawTarget<Color = BinaryColor, Error = core::convert::Infallible>> {
-    display: F,
+pub trait Scene {
+    fn render<DT: DrawTarget<Color = BinaryColor, Error = Infallible>>(&self, display: &mut DT);
 }
 
-impl<F: FBDisplay + DrawTarget<Color = BinaryColor, Error = core::convert::Infallible>> Stack<F> {
-    pub fn new(f: F) -> Self {
-        Self { display: f }
-    }
+pub struct MessageScene {
+    pub message: &'static str,
+}
 
-    pub fn init(&mut self) {
-        self.display.fbclear();
-        self.display.flush();
-
+impl Scene for MessageScene {
+    fn render<DT: DrawTarget<Color = BinaryColor, Error = Infallible>>(&self, display: &mut DT) {
         let text_style = MonoTextStyleBuilder::new()
             .font(&FONT_10X20)
             .text_color(BinaryColor::On)
             .build();
 
-        Text::with_baseline("Hello world!", Point::zero(), text_style, Baseline::Top)
-            .draw(&mut self.display)
+        Text::with_baseline(self.message, Point::zero(), text_style, Baseline::Top)
+            .draw(display)
             .unwrap();
+    }
+}
 
-        Text::with_baseline("Hello Rust!", Point::new(0, 16), text_style, Baseline::Top)
-            .draw(&mut self.display)
-            .unwrap();
+pub struct Stack<F>
+where
+    F: FBDisplay + DrawTarget,
+{
+    display: F,
+    stack: Vec<Box<dyn Fn(&mut F)>>,
+}
 
+impl<F> Stack<F>
+where
+    F: FBDisplay + DrawTarget<Color = BinaryColor, Error = Infallible>,
+{
+    pub fn new(f: F) -> Self {
+        Self {
+            display: f,
+            stack: Vec::with_capacity(5),
+        }
+    }
+
+    pub fn init(&mut self) {
+        self.display.fbclear();
+        self.display.flush();
+    }
+
+    pub fn push<S: Scene + 'static>(&mut self, scene: S) {
+        self.stack
+            .push(Box::new(move |display: &mut F| scene.render(display)));
+    }
+
+    pub fn draw_all(&mut self) {
+        self.display.fbclear();
+        for scene in self.stack.iter() {
+            (scene)(&mut self.display);
+        }
         self.display.flush();
     }
 }

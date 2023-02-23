@@ -14,6 +14,7 @@ use stepper::Tim2CC;
 use stepper::TimerControl;
 
 use core::cell::RefCell;
+use core::convert::Infallible;
 use core::fmt::Binary;
 use core::ops::DerefMut;
 
@@ -174,6 +175,10 @@ fn main() -> ! {
     let mut display_stack = display::Stack::new(fbdis);
     display_stack.init();
 
+    let m1 = display::MessageScene { message: "rocks"};
+    display_stack.push(m1);
+
+    display_stack.draw_all();
 
     let mut delay = cp.SYST.delay(&clocks);
 
@@ -187,7 +192,7 @@ fn main() -> ! {
     loop {
         app.poll();
         usb_ser.usb_task();
-        delay.delay_us(10);
+        delay.delay_us(1_u32);
     }
 }
 
