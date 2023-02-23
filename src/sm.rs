@@ -18,7 +18,5 @@ impl<C: Control> App<C> {
         }
     }
 
-    pub fn poll(&mut self) {
-
-    }
+    pub fn poll(&mut self) {}
 }

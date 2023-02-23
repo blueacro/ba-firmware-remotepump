@@ -45,7 +45,6 @@ pub struct TimerControl<Dir, NSleepPin, M1Pin, M0Pin, En0Pin, En1Pin> {
     pub driver_enabled: Option<Channel>,
 }
 
-
 impl<Dir, NSleep, M1, M0, En0, En1> Control for TimerControl<Dir, NSleep, M1, M0, En0, En1>
 where
     Dir: OutputPin<Error = Infallible>,
@@ -55,11 +54,7 @@ where
     En0: OutputPin<Error = Infallible>,
     En1: OutputPin<Error = Infallible>,
 {
-
-    fn enable_driver(
-        &mut self,
-        driver: &Channel,
-    ) -> Result<(), core::convert::Infallible> {
+    fn enable_driver(&mut self, driver: &Channel) -> Result<(), core::convert::Infallible> {
         self.driver_enabled = Some(driver.clone());
 
         self.nsleep_pin.set_high()?;
@@ -148,7 +143,6 @@ where
         self.m1_pin.set_low()?;
         Ok(())
     }
-
 }
 
 pub struct Tim2CC {

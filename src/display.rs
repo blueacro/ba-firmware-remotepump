@@ -40,16 +40,37 @@ impl Scene for MessageScene {
             .unwrap();
     }
 }
+pub struct DynMessageScene<F: Fn() -> alloc::string::String> {
+    pub f: F,
+}
 
-pub struct Stack<F>
+impl<F: Fn() -> alloc::string::String> Scene for DynMessageScene<F> {
+    fn render<DT: DrawTarget<Color = BinaryColor, Error = Infallible>>(&self, display: &mut DT) {
+        let text_style = MonoTextStyleBuilder::new()
+            .font(&FONT_10X20)
+            .text_color(BinaryColor::On)
+            .build();
+
+        Text::with_baseline(
+            (self.f)().as_str(),
+            Point::zero(),
+            text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap();
+    }
+}
+
+pub struct Stack<'a, F>
 where
     F: FBDisplay + DrawTarget,
 {
     display: F,
-    stack: Vec<Box<dyn Fn(&mut F)>>,
+    stack: Vec<Box<dyn 'a + Fn(&mut F)>>,
 }
 
-impl<F> Stack<F>
+impl<'a, F> Stack<'a, F>
 where
     F: FBDisplay + DrawTarget<Color = BinaryColor, Error = Infallible>,
 {
@@ -65,7 +86,7 @@ where
         self.display.flush();
     }
 
-    pub fn push<S: Scene + 'static>(&mut self, scene: S) {
+    pub fn push<S: Scene + 'a>(&mut self, scene: S) {
         self.stack
             .push(Box::new(move |display: &mut F| scene.render(display)));
     }

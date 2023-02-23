@@ -9,34 +9,30 @@ pub mod sm;
 pub mod stepper;
 pub mod usb;
 
-use sh1106::interface::DisplayInterface;
 use stepper::Tim2CC;
 use stepper::TimerControl;
 
 use core::cell::RefCell;
-use core::convert::Infallible;
-use core::fmt::Binary;
 use core::ops::DerefMut;
+use core::sync::atomic::AtomicI32;
 
 use cortex_m::interrupt::free as int_free;
 use cortex_m::interrupt::Mutex;
 use cortex_m_rt::entry;
+
 use stm32f4xx_hal::gpio::{Alternate, Pin, PushPull};
-
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
-
 use stm32f4xx_hal::pac::{interrupt, Interrupt};
-
 use stm32f4xx_hal::{i2c::I2c, pac, prelude::*};
 
-
+use sh1106::interface::DisplayInterface;
 use sh1106::{prelude::*, Builder};
 
-use embedded_graphics::{
-    pixelcolor::BinaryColor,
-    prelude::*};
+use alloc::format;
+
+use embedded_graphics::{pixelcolor::BinaryColor, prelude::*};
 struct WrappedDisplay<D: DisplayInterface> {
-    display: GraphicsMode<D>
+    display: GraphicsMode<D>,
 }
 
 impl<D: DisplayInterface> display::FBDisplay for WrappedDisplay<D> {
@@ -54,8 +50,9 @@ impl<D: DisplayInterface> DrawTarget for WrappedDisplay<D> {
     type Error = core::convert::Infallible;
 
     fn draw_iter<I>(&mut self, pixels: I) -> Result<(), Self::Error>
-        where
-            I: IntoIterator<Item = Pixel<Self::Color>> {
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
         self.display.draw_iter(pixels)
     }
 }
@@ -65,8 +62,6 @@ impl<D: DisplayInterface> OriginDimensions for WrappedDisplay<D> {
         self.display.size()
     }
 }
-
-
 
 // These lines are part of our setup for debug printing.
 use defmt_rtt as _;
@@ -175,7 +170,9 @@ fn main() -> ! {
     let mut display_stack = display::Stack::new(fbdis);
     display_stack.init();
 
-    let m1 = display::MessageScene { message: "rocks"};
+    let mut count: AtomicI32 = AtomicI32::new(0);
+    let f = || format!("{}", count.load(core::sync::atomic::Ordering::Relaxed));
+    let m1 = display::DynMessageScene { f: f };
     display_stack.push(m1);
 
     display_stack.draw_all();
@@ -192,7 +189,9 @@ fn main() -> ! {
     loop {
         app.poll();
         usb_ser.usb_task();
-        delay.delay_us(1_u32);
+        delay.delay_ms(100_u32);
+        count.fetch_add(1, core::sync::atomic::Ordering::Release);
+        display_stack.draw_all();
     }
 }
 
