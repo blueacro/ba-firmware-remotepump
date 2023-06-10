@@ -141,6 +141,9 @@ where
         // 1/16th microsteps
         self.m0_pin.set_high()?;
         self.m1_pin.set_low()?;
+        // Half steps
+        //self.m0_pin.set_low()?;
+        //self.m1_pin.set_high()?;
         Ok(())
     }
 }

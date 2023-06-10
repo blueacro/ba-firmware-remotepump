@@ -9,6 +9,7 @@ pub mod sm;
 pub mod stepper;
 pub mod usb;
 
+use stepper::Control;
 use stepper::Tim2CC;
 use stepper::TimerControl;
 
@@ -124,9 +125,12 @@ fn main() -> ! {
     let m1_pin = gpiob.pb0.into_push_pull_output();
     let m0_pin = gpiob.pb1.into_push_pull_output();
 
+    let mut trq_pin = gpioa.pa1.into_push_pull_output();
+    trq_pin.set_low();
+
     let mut tim2 = Tim2CC::new(dp.TIM2, &clocks);
     int_free(|cs| TIM2CC.borrow(cs).replace(Some(tim2)));
-    let mut stepper = TimerControl {
+    let mut stp_ctrl = TimerControl {
         dir_pin,
         nsleep_pin,
         m1_pin,
@@ -137,8 +141,10 @@ fn main() -> ! {
         driver_enabled: None,
     };
 
-    stepper.init().unwrap();
+    stp_ctrl.init().unwrap();
 
+    stp_ctrl.enable_driver(&stepper::Channel::One);
+    stp_ctrl.set_speed(5000.Hz());
     let scl = gpiob
         .pb8
         .into_alternate()
@@ -184,7 +190,7 @@ fn main() -> ! {
         cortex_m::peripheral::NVIC::unmask(Interrupt::TIM2);
     }
 
-    let mut app = sm::App::new(stepper);
+    let mut app = sm::App::new(stp_ctrl);
 
     loop {
         app.poll();
